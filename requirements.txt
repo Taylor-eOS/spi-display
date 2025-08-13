@@ -1,0 +1,5 @@
+adafruit-circuitpython-st7735r
+adafruit-circuitpython-rgb-display
+RPi.GPIO
+Pillow
+
