@@ -6,14 +6,11 @@ import subprocess
 from PIL import Image, ImageDraw, ImageFont
 from adafruit_rgb_display import st7735
 
-WIDTH = 128
-HEIGHT = 160
-
 MODE = "system" #Set to "text", "image", or "system"
 IMAGE_FILE = "display_image.png"
-
-SAMPLE_TEXT = """In the beginning was the Word, and the Word was with God, and the Word was God. The same was in the beginning with God. All things were made by him; and without him was not any thing made that was made. In him was life; and the life was the light of men. And the light shineth in darkness; and the darkness comprehended it not. There was a man sent from God, whose name was John. The same came for a witness, to bear witness of the Light, that all men through him might believe. He was not that Light, but was sent to bear witness of that Light. That was the true Light, which lighteth every man that cometh into the world. He was in the world, and the world was made by him, and the world knew him not. He came unto his own, and his own received him not. But as many as received him, to them gave he power to become the sons of God, even to them that believe on his name: Which were born, not of blood, nor of the will of the flesh, nor of the will of man, but of God. And the Word was made flesh, and dwelt among us, (and we beheld his glory, the glory as of the only begotten of the Father,) full of grace and truth."""
-
+WIDTH = 128
+HEIGHT = 160
+SAMPLE_TEXT = """In the beginning was the Word, and the Word was with God, and the Word was God. The same was in the beginning with God. All things were made by him; and without him was not any thing made that was made."""
 spi = board.SPI()
 tft_cs = digitalio.DigitalInOut(board.D5)
 tft_dc = digitalio.DigitalInOut(board.D6)
@@ -141,6 +138,79 @@ def get_uptime():
     except:
         return 0
 
+def get_wifi_strength():
+    import subprocess
+    import re
+    try:
+        ssid = ""
+        try:
+            ssid = subprocess.check_output(["iwgetid", "-r"], stderr=subprocess.DEVNULL).decode().strip()
+        except:
+            ssid = ""
+        out = ""
+        try:
+            out = subprocess.check_output(["iwconfig"], stderr=subprocess.DEVNULL).decode()
+        except:
+            out = ""
+        if out:
+            m = re.search(r"Link Quality=(\d+)/(\d+)", out)
+            if m:
+                q = int(m.group(1))
+                qmax = int(m.group(2))
+                pct = (q / qmax) * 100 if qmax > 0 else 0
+                return (ssid + " " if ssid else "") + f"{pct:.0f}%"
+            m2 = re.search(r"Signal level=(-?\d+)", out)
+            if m2:
+                rssi = int(m2.group(1))
+                if rssi <= -100:
+                    pct = 0
+                elif rssi >= -50:
+                    pct = 100
+                else:
+                    pct = 2 * (rssi + 100)
+                return (ssid + " " if ssid else "") + f"{pct:.0f}%"
+        try:
+            out2 = subprocess.check_output(["iw", "dev"], stderr=subprocess.DEVNULL).decode()
+            iface = None
+            for line in out2.splitlines():
+                line=line.strip()
+                if line.startswith("Interface"):
+                    iface = line.split()[1]
+                    break
+            if iface:
+                out3 = subprocess.check_output(["iw", "dev", iface, "link"], stderr=subprocess.DEVNULL).decode()
+                m3 = re.search(r"signal:\s*(-?\d+)\s*dBm", out3)
+                if m3:
+                    rssi = int(m3.group(1))
+                    if rssi <= -100:
+                        pct = 0
+                    elif rssi >= -50:
+                        pct = 100
+                    else:
+                        pct = 2 * (rssi + 100)
+                    return (ssid + " " if ssid else "") + f"{pct:.0f}%"
+        except:
+            pass
+        try:
+            with open("/proc/net/wireless", "r") as f:
+                lines = f.readlines()
+            for l in lines[2:]:
+                parts = l.split()
+                if len(parts) >= 3:
+                    iface = parts[0].strip(":")
+                    qual = parts[2].strip(".")
+                    try:
+                        qval = float(qual)
+                        pct = (qval / 70.0) * 100
+                        return (ssid + " " if ssid else "") + f"{pct:.0f}%"
+                    except:
+                        continue
+        except:
+            pass
+        return "No WiFi" if not ssid else ssid
+    except:
+        return "N/A"
+
 def display_system():
     font_small = try_font(9)
     font_med = try_font(11)
@@ -167,6 +237,9 @@ def display_system():
     y += line_height + 2
     draw.text((5, y), f"IP: {ip_addr}", font=font_small, fill=(100, 255, 100))
     y += line_height + 2
+    wifi_str = get_wifi_strength()
+    draw.text((5, y), f"WiFi: {wifi_str}", font=font_small, fill=(100, 255, 100))
+    y += line_height
     uptime_seconds = get_uptime()
     hours = int(uptime_seconds // 3600)
     minutes = int((uptime_seconds % 3600) // 60)
@@ -185,6 +258,7 @@ def display_system():
     y += line_height
     draw.text((5, y), current_time, font=font_med, fill=(255, 255, 0))
     display.image(image)
+
 
 if MODE == "text":
     display_text()
