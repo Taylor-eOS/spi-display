@@ -16,6 +16,7 @@ tft_cs = digitalio.DigitalInOut(board.D5)
 tft_dc = digitalio.DigitalInOut(board.D6)
 tft_reset = digitalio.DigitalInOut(board.D12)
 display = st7735.ST7735R(spi, cs=tft_cs, dc=tft_dc, rst=tft_reset, width=WIDTH, height=HEIGHT)
+_WIFI_CACHE = {"iface": None, "last_rssi": None, "alpha": 0.3}
 
 def try_font(size):
     try:
@@ -138,78 +139,88 @@ def get_uptime():
     except:
         return 0
 
-def get_wifi_strength():
-    import subprocess
-    import re
+def _detect_iface(timeout=0.2):
+    import subprocess, re
     try:
+        p = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=timeout)
+        for line in p.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Interface"):
+                return line.split()[1]
+    except:
+        pass
+    try:
+        with open("/proc/net/wireless", "r") as f:
+            lines = f.readlines()
+        for l in lines[2:]:
+            parts = l.split()
+            if parts:
+                return parts[0].strip(":")
+    except:
+        pass
+    return None
+
+def get_wifi_strength():
+    import subprocess, re
+    ssid = ""
+    try:
+        ssid = subprocess.run(["iwgetid", "-r"], capture_output=True, text=True, timeout=0.15).stdout.strip()
+    except:
         ssid = ""
+    iface = _WIFI_CACHE.get("iface")
+    if not iface:
+        iface = _detect_iface()
+        _WIFI_CACHE["iface"] = iface
+    rssi = None
+    pct = None
+    if iface:
         try:
-            ssid = subprocess.check_output(["iwgetid", "-r"], stderr=subprocess.DEVNULL).decode().strip()
-        except:
-            ssid = ""
-        out = ""
-        try:
-            out = subprocess.check_output(["iwconfig"], stderr=subprocess.DEVNULL).decode()
-        except:
-            out = ""
-        if out:
-            m = re.search(r"Link Quality=(\d+)/(\d+)", out)
+            out = subprocess.run(["iw", "dev", iface, "link"], capture_output=True, text=True, timeout=0.25).stdout
+            m = re.search(r"signal:\s*(-?\d+)\s*dBm", out)
             if m:
-                q = int(m.group(1))
-                qmax = int(m.group(2))
-                pct = (q / qmax) * 100 if qmax > 0 else 0
-                return (ssid + " " if ssid else "") + f"{pct:.0f}%"
-            m2 = re.search(r"Signal level=(-?\d+)", out)
-            if m2:
-                rssi = int(m2.group(1))
-                if rssi <= -100:
-                    pct = 0
-                elif rssi >= -50:
-                    pct = 100
-                else:
-                    pct = 2 * (rssi + 100)
-                return (ssid + " " if ssid else "") + f"{pct:.0f}%"
-        try:
-            out2 = subprocess.check_output(["iw", "dev"], stderr=subprocess.DEVNULL).decode()
-            iface = None
-            for line in out2.splitlines():
-                line=line.strip()
-                if line.startswith("Interface"):
-                    iface = line.split()[1]
-                    break
-            if iface:
-                out3 = subprocess.check_output(["iw", "dev", iface, "link"], stderr=subprocess.DEVNULL).decode()
-                m3 = re.search(r"signal:\s*(-?\d+)\s*dBm", out3)
-                if m3:
-                    rssi = int(m3.group(1))
-                    if rssi <= -100:
-                        pct = 0
-                    elif rssi >= -50:
-                        pct = 100
-                    else:
-                        pct = 2 * (rssi + 100)
-                    return (ssid + " " if ssid else "") + f"{pct:.0f}%"
+                rssi = int(m.group(1))
         except:
-            pass
+            rssi = None
+    if rssi is None:
         try:
             with open("/proc/net/wireless", "r") as f:
                 lines = f.readlines()
             for l in lines[2:]:
                 parts = l.split()
                 if len(parts) >= 3:
-                    iface = parts[0].strip(":")
                     qual = parts[2].strip(".")
                     try:
                         qval = float(qual)
-                        pct = (qval / 70.0) * 100
-                        return (ssid + " " if ssid else "") + f"{pct:.0f}%"
+                        pct = max(0.0, min(100.0, (qval / 70.0) * 100.0))
+                        break
                     except:
                         continue
         except:
-            pass
-        return "No WiFi" if not ssid else ssid
-    except:
-        return "N/A"
+            pct = None
+    if rssi is None and pct is None:
+        try:
+            out = subprocess.run(["iwconfig"], capture_output=True, text=True, timeout=0.25).stdout
+            m = re.search(r"Signal level=(-?\d+)", out)
+            if m:
+                rssi = int(m.group(1))
+        except:
+            rssi = None
+    if rssi is not None:
+        last = _WIFI_CACHE.get("last_rssi")
+        alpha = _WIFI_CACHE.get("alpha", 0.3)
+        smooth = rssi if last is None else (last * (1.0 - alpha) + rssi * alpha)
+        _WIFI_CACHE["last_rssi"] = smooth
+        rssi_int = int(round(smooth))
+        if rssi_int <= -100:
+            pct = 0.0
+        elif rssi_int >= -50:
+            pct = 100.0
+        else:
+            pct = 2.0 * (rssi_int + 100.0)
+        return (ssid + " " if ssid else "") + f"{pct:.0f}% ({rssi_int} dBm)"
+    if pct is not None:
+        return (ssid + " " if ssid else "") + f"{pct:.0f}%"
+    return "No WiFi" if not ssid else ssid
 
 def display_system():
     font_small = try_font(9)
@@ -238,7 +249,7 @@ def display_system():
     draw.text((5, y), f"IP: {ip_addr}", font=font_small, fill=(100, 255, 100))
     y += line_height + 2
     wifi_str = get_wifi_strength()
-    draw.text((5, y), f"WiFi: {wifi_str}", font=font_small, fill=(100, 255, 100))
+    draw.text((5, y), f"{wifi_str}", font=font_small, fill=(100, 255, 100))
     y += line_height
     uptime_seconds = get_uptime()
     hours = int(uptime_seconds // 3600)
